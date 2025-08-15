@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "axios": "^1.11.0",
+    "express": "^5.1.0",
+    "gologin": "^2.1.30",
+    "puppeteer": "^24.16.2"
+  }
+}
