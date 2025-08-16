@@ -1,76 +1,213 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 const axios = require('axios');
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
-// 🗂️ Ánh xạ profileId → token
-const profileMap = {
-  '689db6f42fc832f7573cb4be': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2ODlkYjZjYTJmYzgzMmY3NTczYzgxN2IiLCJ0eXBlIjoiZGV2Iiwiand0aWQiOiI2ODlkYjZmNDJmYzgzMmY3NTczY2I0YmUifQ.sM_s23wKDFlx36bXIh9WT3N_vC_cywogOJnLvIy-iSk',
-  '689dce77a92024e3ca61fd4d': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2ODlkYjZjYTJmYzgzMmY3NTczYzgxN2IiLCJ0eXBlIjoiZGV2Iiwiand0aWQiOiI2ODlkY2U3N2E5MjAyNGUzY2E2MWZkNGQifQ.D8c24uWlpao1Tsaf2Pp9SwzUHMqRPT7YxKLLbxMJz7M',
-  '689eae0e48586f9d4b688fc0': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2ODlkYjZjYTJmYzgzMmY3NTczYzgxN2IiLCJ0eXBlIjoiZGV2Iiwiand0aWQiOiI2ODllYWUwZTQ4NTg2ZjlkNGI2ODhmYzAifQ.zH4Bn0Sm0vyxlIfWaezRbleoSxklJJLemRio7yvYzmk'
+const defaultProxy = {
+  mode: 'socks5',
+  host: '898764bc1f130b05.shg.na.pyproxy.io',
+  port: 16666,
+  username: 'huyvumedia1-zone-resi-region-us',
+  password: 'Zxcv123123'
 };
 
-// 🍪 Lấy cookie từ profile (dùng đúng token theo profileId)
+// 🧼 Đảm bảo profile có đầy đủ trường
+function sanitizeProfile(profile) {
+  return {
+    ...profile,
+    browserType: profile.browserType || 'chrome',
+    os: profile.os || 'win',
+    navigator: profile.navigator || {
+      userAgent: 'Mozilla/5.0',
+      language: 'en-US',
+      resolution: '1920x1080'
+    },
+    proxy: profile.proxy || {}
+  };
+}
+
+async function updateProxy(profileId, token, proxyConfig) {
+  const { data: profile } = await axios.get(`https://api.gologin.com/browser/${profileId}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  // Ép kiểu port sang số
+  const port = Number(proxyConfig?.port);
+
+  // Kiểm tra proxy hợp lệ
+  const isValidProxy =
+    proxyConfig &&
+    typeof proxyConfig.host === 'string' &&
+    !isNaN(port) &&
+    typeof proxyConfig.username === 'string' &&
+    typeof proxyConfig.password === 'string' &&
+    typeof proxyConfig.mode === 'string';
+
+  if (!isValidProxy) {
+    console.warn('⚠️ Proxy config không hợp lệ, bỏ qua cập nhật proxy');
+    console.log('🔍 Proxy nhận được:', proxyConfig);
+    return;
+  }
+
+  const updatedProfile = {
+    ...profile,
+    proxyEnabled: true,
+    proxy: {
+      mode: proxyConfig.mode,
+      host: proxyConfig.host,
+      port,
+      username: proxyConfig.username,
+      password: proxyConfig.password
+    },
+    browserType: profile.browserType || 'chrome',
+    os: profile.os || 'win',
+    navigator: profile.navigator || {
+      userAgent: 'Mozilla/5.0',
+      language: 'en-US',
+      resolution: '1920x1080'
+    }
+  };
+
+  await axios.put(`https://api.gologin.com/browser/${profileId}`, updatedProfile, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  console.log(`🌐 Proxy đã được cập nhật cho profile ${profileId}`);
+}
+
+async function getProfiles(token) {
+  const decoded = jwt.decode(token);
+  const accountId = decoded?.sub;
+
+  const res = await axios.get('https://api.gologin.com/browser/v2', {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  const rawProfiles = Array.isArray(res.data) ? res.data : res.data.profiles;
+
+  return {
+    accountId,
+    profiles: rawProfiles.map(p => ({ id: p.id, name: p.name }))
+  };
+}
+
+async function createCloneProfile(originalId, token, cloneName) {
+  const { data: originalProfile } = await axios.get(`https://api.gologin.com/browser/${originalId}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  const sanitized = sanitizeProfile(originalProfile);
+
+  const clonePayload = {
+    ...sanitized,
+    name: cloneName,
+    notes: 'Cloned via API'
+  };
+
+  delete clonePayload.id;
+  delete clonePayload.uuid;
+  delete clonePayload.createdAt;
+  delete clonePayload.updatedAt;
+
+  const res = await axios.post('https://api.gologin.com/browser', clonePayload, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  console.log(`✅ Profile clone thành công: ${res.data.name}`);
+  return res.data.id;
+}
+
+// 🍪 Lấy cookie từ profile clone
 app.post('/cookies', async (req, res) => {
-  const { profileId, proxy } = req.body;
+  const { token, profileId: originalProfileId, proxy, cloneName = 'TextNow_Clone' } = req.body;
 
-  if (!profileId || !proxy) {
-    return res.status(400).json({ error: 'Missing profileId or proxy' });
+  if (!token || !originalProfileId) {
+    return res.status(400).json({ error: 'Missing token or originalProfileId' });
   }
 
-  const token = profileMap[profileId];
-  if (!token) {
-    return res.status(403).json({ error: 'Token not found for this profileId' });
-  }
+  let cloneId;
 
   try {
-    // 📋 Kiểm tra profile tồn tại và token hợp lệ
-    const checkProfile = await axios.get(`https://api.gologin.com/browser/${profileId}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+    const { profiles } = await getProfiles(token);
+    let cloneProfile = profiles.find(p => p.name === cloneName);
 
-    console.log(`✅ Profile "${checkProfile.data.name}" tồn tại, tiếp tục khởi động...`);
+    let cloneId;
 
-    // 🟢 Mở profile
-    await axios.post(`https://api.gologin.com/browser/start/${profileId}`, null, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+    if (!cloneProfile) {
+      cloneId = await createCloneProfile(originalProfileId, token, cloneName);
+    } else {
+      cloneId = cloneProfile.id;
+      console.log(`🔁 Profile clone đã tồn tại: ${cloneName}`);
+    }
 
-    await new Promise(resolve => setTimeout(resolve, 5000)); // ⏳ Chờ profile khởi động
+    const proxyConfig = proxy || defaultProxy;
+    await updateProxy(cloneId, token, proxyConfig);
 
-    // 🔌 Lấy wsEndpoint
-    const response = await axios.get(`https://api.gologin.com/browser/${profileId}/websocket`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+    const wsEndpoint = `wss://cloudbrowser.gologin.com/connect?token=${token}&profile=${cloneId}`;
 
-    const wsEndpoint = response.data.wsUrl;
-    const browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+    let browser;
+    try {
+      browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+    } catch (err) {
+      throw new Error('Không thể kết nối tới GoLogin browser. Đảm bảo profile đã được khởi chạy.');
+    }
+
     const pages = await browser.pages();
-    const page = pages.length > 0 ? pages[0] : await browser.newPage();
+    const page = pages.length ? pages[0] : await browser.newPage();
 
     await page.goto('https://www.textnow.com/login', { waitUntil: 'networkidle2' });
-    await page.waitForTimeout(2000);
+    await page.waitForFunction(() => document.cookie.includes('XSRF-TOKEN'), { timeout: 5000 });
 
     const cookies = await page.cookies();
-    const xsrfToken = cookies.find(c => c.name === 'XSRF-TOKEN')?.value;
+    const xsrfToken = cookies.find(c => c.name === 'XSRF-TOKEN')?.value || null;
     const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
 
     await browser.disconnect();
 
-    res.json({ xsrfToken, cookieHeader, cookies });
+    const output = {
+      cloneId,
+      cloneName,
+      xsrfToken,
+      cookieHeader,
+      cookies
+    };
+
+    const dir = path.join(__dirname, 'cookies');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, `${cloneName}.json`), JSON.stringify(output, null, 2));
+
+    console.log(`✅ Cookie đã lưu: cookies/${cloneName}.json`);
+    res.json(output);
   } catch (err) {
-    console.error('❌ Lỗi:', err.response?.status, err.response?.data || err.message);
+    console.error('❌ Error:', err.response?.status, err.response?.data || err.message);
     res.status(500).json({
-      error: 'Failed to get cookies',
+      error: 'Cannot get cookie',
       details: err.response?.data || err.message
     });
   }
+
+  if (cloneId) {
+    try {
+      await axios.delete(`https://api.gologin.com/browser/${cloneId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      console.log(`🧹 Đã xóa profile clone: ${cloneName}`);
+    } catch (err) {
+      console.warn(`⚠️ Không thể xóa profile clone: ${cloneName}`, err.message);
+    }
+  } 
+
+  console.log(`🧹 Đã xóa profile clone: ${cloneName}`);
+
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 GoLogin service running at http://localhost:${PORT}`);
+  console.log(`🚀 GoLogin Cookie Service running at http://localhost:${PORT}`);
 });

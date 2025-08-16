@@ -1,8 +1,12 @@
 {
   "dependencies": {
     "axios": "^1.11.0",
+    "chrome-remote-interface": "^0.33.3",
     "express": "^5.1.0",
+    "fs": "^0.0.1-security",
     "gologin": "^2.1.30",
-    "puppeteer": "^24.16.2"
+    "jsonwebtoken": "^9.0.2",
+    "puppeteer": "^24.16.2",
+    "puppeteer-core": "^24.16.2"
   }
 }
